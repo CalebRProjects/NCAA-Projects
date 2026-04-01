@@ -1,0 +1,477 @@
+---
+title: "Neo Avdalas: Prospect Evaluation"
+author: "Caleb Ramsey"
+date: "`r Sys.Date()`"
+output:
+  bookdown::pdf_document2:
+    latex_engine: xelatex
+    toc: FALSE
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(stringr)
+library(readxl)
+library(readr)
+library(ggrepel)
+library(janitor)
+library(showtext)
+library(sysfonts)
+
+# Global knit options
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.pos = "H",
+  fig.align = "center",
+  dpi = 300,
+  out.width = "100%"
+)
+
+# Helpers
+to_num <- function(x) {
+  suppressWarnings(readr::parse_number(as.character(x), na = c("", "NA", "-", "NaN")))
+}
+
+name_key <- function(x) {
+  str_to_lower(str_squish(as.character(x)))
+}
+
+parse_made_att <- function(x) {
+  s <- as.character(x)
+  s <- ifelse(is.na(s), NA_character_, s)
+  made <- suppressWarnings(as.numeric(str_extract(s, "^[0-9]+")))
+  att  <- suppressWarnings(as.numeric(str_extract(s, "(?<=-)[0-9]+$")))
+  tibble(made = made, att = att)
+}
+
+# Fonts + theme
+font_add_google("Inter", "inter")
+showtext_auto()
+
+CAPTION_LINE <- "Data: Synergy / SportsRadar | Viz: @Rambzee_"
+
+theme_caleb <- function() {
+  theme_minimal(base_family = "inter") +
+    theme(
+      plot.background  = element_rect(fill = "#f6f4ef", color = NA),
+      panel.background = element_rect(fill = "#f6f4ef", color = NA),
+      panel.grid.major = element_line(color = "#dedad3"),
+      panel.grid.minor = element_blank(),
+      plot.title       = element_text(face = "bold"),
+      plot.subtitle    = element_text(color = "gray30"),
+      axis.title       = element_text(color = "gray20"),
+      axis.text        = element_text(color = "gray15")
+    )
+}
+
+# Paths
+path_roster_all   <- "Virginia Tech Roster Stats - All D1.xlsx"
+path_roster_top50 <- "Virginia Tech Stats - Top 50.xlsx"
+path_neo_shots    <- "Synergy File"
+path_neo_play     <- "Synergy File"
+
+# Readers
+read_roster <- function(path, comp_level = c("all_d1", "top50")) {
+  comp_level <- match.arg(comp_level)
+
+  df <- read_excel(path) |>
+    clean_names()
+
+  if ("ast_17" %in% names(df)) df <- df |> rename(ast = ast_17)
+  if ("ast_34" %in% names(df)) df <- df |> rename(ast_dup = ast_34)
+
+  num_cols <- intersect(
+    names(df),
+    c(
+      "gp", "min_percent", "prpg", "d_prpg", "bpm", "obpm", "dbpm", "ortg", "usg",
+      "efg", "ts", "or", "dr", "ast", "to", "a_to", "blk", "stl", "ftr",
+      "close_2_fg_percent", "far_2_fg_percent", "ft_percent", "x2p_percent",
+      "x3pr", "x3p_percent", "reb", "pts"
+    )
+  )
+
+  out <- df |>
+    mutate(comp_level = comp_level) |>
+    mutate(across(all_of(num_cols), to_num))
+
+  if ("close_2_fgm_att" %in% names(out)) {
+    c2 <- parse_made_att(out$close_2_fgm_att)
+    out <- out |> mutate(close2_m = c2$made, close2_a = c2$att)
+  }
+  if ("far_2_fgm_att" %in% names(out)) {
+    f2 <- parse_made_att(out$far_2_fgm_att)
+    out <- out |> mutate(far2_m = f2$made, far2_a = f2$att)
+  }
+  if ("ftm_fta" %in% names(out)) {
+    ft <- parse_made_att(out$ftm_fta)
+    out <- out |> mutate(ft_m = ft$made, ft_a = ft$att)
+  }
+  if ("x2pm_2pa" %in% names(out)) {
+    tw <- parse_made_att(out$x2pm_2pa)
+    out <- out |> mutate(twop_m = tw$made, twop_a = tw$att)
+  }
+  if ("x3pm_3pa" %in% names(out)) {
+    th <- parse_made_att(out$x3pm_3pa)
+    out <- out |> mutate(three_m = th$made, three_a = th$att)
+  }
+
+  out
+}
+
+read_neo_shots <- function(path) {
+  read_excel(path) |>
+    rename(
+      shot_type = `Shot Type`,
+      percent_time = `%Time`,
+      percent_time_rank = `%Time Rank`,
+      pts = Pts,
+      fgm = FGM,
+      fga = FGA,
+      fg = `FG%`,
+      efg = `eFG%`,
+      pps = PPS,
+      pps_rank = `PPS Rank`,
+      pps_rating = `PPS Rating`,
+      x2fgm = `2FGM`,
+      x2fga = `2FGA`,
+      x2fg = `2FG%`,
+      x3fgm = `3FGM`,
+      x3fga = `3FGA`,
+      x3fg = `3FG%`
+    ) |>
+    mutate(
+      shot_type = as.character(shot_type),
+      across(-shot_type, to_num)
+    )
+}
+
+read_neo_playtypes <- function(path) {
+  read_excel(path) |>
+    rename(
+      playtype = Playtype,
+      poss = Poss,
+      percent_time = `%Time`,
+      percent_time_rank = `%Time Rank`,
+      pts = Pts,
+      ppp = PPP,
+      ppp_rank = `PPP Rank`,
+      ppp_rating = `PPP Rating`,
+      fgm = FGM,
+      fga = FGA,
+      fg = `FG%`,
+      efg = `eFG%`,
+      to_percent = `TO%`,
+      x2fgm = `2FGM`,
+      x2fga = `2FGA`,
+      x2fg = `2FG%`,
+      x3fgm = `3FGM`,
+      x3fga = `3FGA`,
+      x3fg = `3FG%`
+    ) |>
+    mutate(
+      playtype = as.character(playtype),
+      across(-playtype, to_num)
+    )
+}
+
+# Load data
+roster_all   <- read_roster(path_roster_all, "all_d1")
+roster_top50 <- read_roster(path_roster_top50, "top50")
+neo_shots    <- read_neo_shots(path_neo_shots)
+neo_playtypes <- read_neo_playtypes(path_neo_play)
+
+# Target player
+player_name <- "Neoklis Avdalas"
+neo_stem <- "avdal"
+
+get_player_row <- function(df, nm = player_name, fallback_stem = neo_stem) {
+  out <- df |>
+    filter(name_key(player) == name_key(nm)) |>
+    slice(1)
+
+  if (nrow(out) == 0) {
+    out <- df |>
+      filter(str_detect(name_key(player), fallback_stem)) |>
+      slice(1)
+  }
+
+  out
+}
+
+neo_all   <- get_player_row(roster_all)
+neo_top50 <- get_player_row(roster_top50)
+
+# Build split table
+pick_metrics <- function(x) {
+  x |>
+    transmute(
+      `MIN%` = min_percent,
+      `USG%` = usg,
+      `AST%` = ast,
+      `AST/TO` = a_to,
+      `BPM` = bpm,
+      `OBPM` = obpm,
+      `DBPM` = dbpm,
+      `TS%` = ts,
+      `3PAr` = x3pr,
+      `BLK%` = blk,
+      `STL%` = stl
+    )
+}
+
+split_tbl <- bind_rows(
+  if (nrow(neo_all) > 0) pick_metrics(neo_all) |> mutate(Split = "All-D1") else NULL,
+  if (nrow(neo_top50) > 0) pick_metrics(neo_top50) |> mutate(Split = "Top-50") else NULL
+) |>
+  relocate(Split) |>
+  mutate(across(where(is.numeric), ~ round(.x, 1)))
+
+delta_tbl <- NULL
+if (nrow(split_tbl) == 2) {
+  a <- split_tbl |> filter(Split == "All-D1") |> select(-Split)
+  b <- split_tbl |> filter(Split == "Top-50") |> select(-Split)
+
+  delta_tbl <- (b - a) |>
+    mutate(Split = "Top-50 – All-D1") |>
+    relocate(Split) |>
+    mutate(across(where(is.numeric), ~ round(.x, 1)))
+}
+
+split_tbl_final <- if (!is.null(delta_tbl)) bind_rows(split_tbl, delta_tbl) else split_tbl
+
+split_tbl_final <- split_tbl_final |>
+  rename(`A/T` = `AST/TO`) |>
+  mutate(
+    Split = case_when(
+      Split == "Top-50 – All-D1" ~ "Δ (Top50-AllD1)",
+      TRUE ~ Split
+    )
+  )
+
+kbl_compact <- function(df) {
+  align_vec <- c("l", rep("c", ncol(df) - 1))
+
+  df |>
+    kable(
+      format = "latex",
+      booktabs = TRUE,
+      align = align_vec,
+      digits = 1,
+      escape = TRUE
+    ) |>
+    kable_styling(
+      latex_options = "hold_position",
+      font_size = 8.3,
+      full_width = FALSE,
+      position = "center"
+    ) |>
+    column_spec(1, width = "3.1cm") |>
+    column_spec(which(names(df) == "A/T"), width = "1.05cm") |>
+    column_spec(which(names(df) == "BPM"), width = "1.05cm") |>
+    column_spec(
+      setdiff(2:ncol(df), c(which(names(df) == "A/T"), which(names(df) == "BPM"))),
+      width = "0.92cm"
+    ) |>
+    row_spec(0, bold = TRUE)
+}
+```
+
+# Neo Avdalas - One-Page Prospect Stat Report
+
+## Role
+**Jumbo guard / secondary creator** with off-ball and defensive value.
+
+## Counting Stats
+
+```{r counting-stats}
+basic_stats <- tibble(
+  GP = 18,
+  MIN = 32.4,
+  FG = "4.7/11.3",
+  `FG%` = 41.9,
+  `3PT` = "1.7/5.3",
+  `3P%` = 31.6,
+  FT = "2.8/4.0",
+  `FT%` = 69.4,
+  REB = 3.1,
+  AST = 5.2,
+  BLK = 0.6,
+  STL = 0.7,
+  TO = 2.6,
+  PTS = 13.9
+)
+
+basic_stats |>
+  kable(
+    booktabs = TRUE,
+    digits = 1
+  ) |>
+  kable_styling(
+    full_width = TRUE,
+    font_size = 9,
+    latex_options = "HOLD_position"
+  )
+```
+
+## All-D1 vs. Top-50 (BartTorvik)
+
+```{r barttorvik-split-table}
+if (nrow(split_tbl_final) == 0) {
+  cat("Neo row not found in roster tables. Check player spelling in `player_name` or `neo_stem`.")
+} else {
+  kbl_compact(split_tbl_final)
+}
+```
+
+## Shot Diet (Volume vs. Efficiency)
+
+```{r shot-type-profile, fig.height=3.4, fig.width=7.0}
+vt_maroon <- "#660000"
+vt_orange <- "#CF4420"
+vt_gray   <- "#75787B"
+vt_cream  <- "#F6F4EF"
+
+theme_vt <- function() {
+  theme_minimal(base_family = "inter") +
+    theme(
+      plot.background  = element_rect(fill = vt_cream, color = NA),
+      panel.background = element_rect(fill = vt_cream, color = NA),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_line(color = "#DEDAD3", linewidth = 0.35),
+      plot.title = element_text(
+        face = "bold",
+        size = 13,
+        color = vt_maroon,
+        hjust = 0.5
+      ),
+      plot.subtitle = element_text(
+        size = 9.5,
+        color = "gray25",
+        hjust = 0.5
+      ),
+      plot.caption = element_text(
+        size = 8,
+        color = "gray35",
+        hjust = 0
+      ),
+      strip.background = element_blank(),
+      strip.text = element_text(
+        face = "bold",
+        size = 9,
+        color = vt_maroon
+      ),
+      axis.title = element_blank(),
+      axis.text.y = element_text(size = 9, color = "gray15"),
+      axis.text.x = element_text(size = 8, color = "gray20")
+    )
+}
+
+shots_long <- neo_shots |>
+  transmute(
+    shot_type = str_squish(shot_type),
+    `%Time` = percent_time,
+    `eFG%` = efg,
+    PPS = pps
+  ) |>
+  pivot_longer(cols = c(`%Time`, `eFG%`, PPS), names_to = "Metric", values_to = "Value") |>
+  mutate(
+    Metric = factor(Metric, levels = c("%Time", "eFG%", "PPS")),
+    shot_type = factor(
+      shot_type,
+      levels = (
+        neo_shots |>
+          mutate(shot_type = str_squish(shot_type)) |>
+          arrange(desc(percent_time)) |>
+          pull(shot_type)
+      )
+    )
+  )
+
+ggplot(shots_long, aes(x = shot_type, y = Value)) +
+  geom_col(width = 0.72, fill = vt_maroon, alpha = 0.90) +
+  coord_flip() +
+  facet_wrap(~ Metric, scales = "free_x", nrow = 1) +
+  scale_y_continuous(
+    labels = function(x) x,
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  theme_vt() +
+  labs(
+    title = "Shot Type Profile",
+    subtitle = "Shot volume and efficiency across shot families",
+    caption = CAPTION_LINE
+  ) +
+  facet_wrap(
+    ~ Metric,
+    scales = "free_x",
+    nrow = 1,
+    labeller = as_labeller(c(
+      "%Time" = "%Time",
+      "eFG%" = "eFG%",
+      "PPS" = "PPS"
+    ))
+  )
+```
+
+## Playtype Efficiency
+
+```{r playtype-profile, fig.height=3.4, fig.width=7.0}
+vt_maroon <- "#861F41"
+vt_cream  <- "#F6F4EF"
+
+pt <- neo_playtypes |>
+  mutate(playtype = str_squish(playtype)) |>
+  filter(!is.na(percent_time), !is.na(ppp), !is.na(poss))
+
+ggplot(pt, aes(x = percent_time, y = ppp)) +
+  geom_point(aes(size = poss, color = playtype), alpha = 0.9) +
+  scale_size_continuous(range = c(2.5, 10), breaks = c(25, 50, 75, 100)) +
+  theme_minimal(base_family = "inter") +
+  theme(
+    plot.background  = element_rect(fill = vt_cream, color = NA),
+    panel.background = element_rect(fill = vt_cream, color = NA),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "#DEDAD3", linewidth = 0.35),
+    plot.title = element_text(face = "bold", size = 13, color = vt_maroon, hjust = 0.5),
+    plot.subtitle = element_text(size = 9.5, color = "gray25", hjust = 0.5),
+    plot.caption = element_text(size = 8, color = "gray35", hjust = 0),
+    axis.title = element_text(color = "gray20"),
+    axis.text  = element_text(color = "gray15"),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right"
+  ) +
+  labs(
+    title = "Playtype Frequency vs. Efficiency",
+    subtitle = "Color = playtype | Size = possessions",
+    x = "%Time",
+    y = "PPP",
+    color = NULL,
+    size = "Poss",
+    caption = CAPTION_LINE
+  )
+```
+
+## Summary
+
+**What he is**
+
+Neoklis Avdalas is an incredibly gifted wing-sized 6'9" creator who has been trusted to start at guard consistently, even if he is not yet a true full-time guard at the highest level. When he gets downhill, he is an excellent finisher with touch and body control, but against elite competition those rim opportunities come less frequently due to handle limitations and the lack of top-tier burst or strength. As a result, his offensive game currently leans too heavily on off-the-dribble jumpers, where confidence outpaces efficiency.
+
+**What the data says**
+
+Against Top-50 opponents, with small-sample caveats, Avdalas shows notable drops in efficiency and overall impact, but his responsibilities remain consistent. His usage remains high, and his AST% is encouraging. Across all competition, a roughly 2:1 AST-to-turnover ratio points to genuine playmaking ability. Defensively, his size, length, and IQ provide real value even when the offense stalls, with stock rates that remain encouraging despite slipping against elite competition.
+
+**Why he matters**
+
+Virginia Tech heavily leans on Avdalas even in its toughest games, and that trust, paired with a positive overall BPM, reflects how advanced his feel and processing already are. He creates advantages out of pick-and-roll consistently, putting defenders in jail, reading the low man, and playing with patience rather than speed. The swing factor is whether a tighter handle, added strength, and cleaner shot selection can produce more consistent rim pressure and allow his passing and finishing to translate to the next level. He has also shown real catch-and-shoot pop, which adds to his offensive floor. As it stands, Avdalas is one of the highest-feel prospects in the class with clear upside, but meaningful development is still required for that feel to translate into efficient, high-level offense.
